@@ -13,7 +13,7 @@ use crate::commands::{self, CommandAction};
 
 pub(crate) const DEFAULT_TRAIN_EPOCHS: usize = 2_000;
 pub(crate) const DEFAULT_TRAIN_EPSILON: f64 = 0.02;
-const UNKNOWN_CONFIDENCE_THRESHOLD: f64 = 0.50;
+const UNKNOWN_CONFIDENCE_THRESHOLD: f64 = 0.30;
 const MAX_RECURSIVE_RESULT_DEPTH: usize = 8;
 const SESSION_CONTEXT_DECAY: f64 = 0.65;
 const SESSION_CONTEXT_INPUT_WEIGHT: f64 = 0.25;
@@ -1066,10 +1066,6 @@ pub(crate) fn answer_or_learn(
             print_prediction(prediction);
         }
 
-        if let Some(prediction) = &prediction_chain.terminal {
-            print_below_threshold_prediction(prediction);
-        }
-
         record_prediction_chain(session_context, message, &prediction_chain.confident);
         return Ok(());
     }
@@ -1191,14 +1187,6 @@ fn needs_training(prediction: Option<&ChatPrediction>) -> bool {
 fn print_prediction(prediction: &ChatPrediction) {
     let confidence = prediction.score.clamp(0.0, 1.0);
     println!("{} ({confidence:.3})", prediction.response);
-}
-
-fn print_below_threshold_prediction(prediction: &ChatPrediction) {
-    let confidence = prediction.score.clamp(0.0, 1.0);
-    println!(
-        "stopped below threshold: {} ({confidence:.3})",
-        prediction.response
-    );
 }
 
 #[cfg(test)]
