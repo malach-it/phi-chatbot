@@ -61,9 +61,10 @@ The chatbot stores learned data under `data/`:
 
 ```text
 data/chatbot_memory.tsv       remembered training examples
+data/chatbot_phi_all.tsv      learned phi state
 ```
 
-Memory examples are loaded on startup. The model retrains from seed data and remembered examples each run.
+Memory examples are loaded on startup. Sparse phi state is also loaded on startup when compatible with the selected mode.
 
 ## Project Layout
 

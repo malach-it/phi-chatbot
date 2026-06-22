@@ -8,7 +8,11 @@ use self::dense_curve::DenseCurveClassifier;
 use self::sparse_phi::SparsePhiClassifier;
 
 pub(crate) use self::curve_plot::{add_curve_points, draw_curve};
-pub(crate) use self::sparse_phi::SparsePhiKind;
+pub(crate) use self::sparse_phi::{
+    control_points_from_piecewise_linear, control_points_from_polynomial, ensure_sparse_state,
+    parse_float_list, parse_global_phi_expression, parse_index_list, parse_merged_phi_expression,
+    remap_sparse_snapshot_states, SparsePhiKind, SparsePhiSnapshotState,
+};
 
 #[derive(Debug)]
 pub(crate) struct EncodedChatExample {
@@ -57,6 +61,35 @@ impl ChatClassifier {
         match self {
             Self::DenseCurve(classifier) => classifier.predict(features, input_size),
             Self::Sparse(classifier) => classifier.predict(features),
+        }
+    }
+
+    pub(crate) fn from_sparse_snapshot(
+        kind: SparsePhiKind,
+        max_degree: usize,
+        state: SparsePhiSnapshotState,
+    ) -> Self {
+        Self::Sparse(SparsePhiClassifier::from_snapshot(kind, max_degree, state))
+    }
+
+    pub(crate) fn write_phi_snapshot(
+        &self,
+        response_index: usize,
+        output: &mut String,
+    ) -> Option<()> {
+        match self {
+            Self::DenseCurve(_) => None,
+            Self::Sparse(classifier) => {
+                classifier.write_phi_snapshot(response_index, output);
+                Some(())
+            }
+        }
+    }
+
+    pub(crate) fn merged_phi_expression(&self) -> Option<String> {
+        match self {
+            Self::DenseCurve(_) => None,
+            Self::Sparse(classifier) => Some(classifier.merged_phi_expression()),
         }
     }
 

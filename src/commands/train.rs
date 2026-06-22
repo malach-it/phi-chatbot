@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::chatbot::{ChatBot, DEFAULT_TRAIN_EPOCHS, DEFAULT_TRAIN_EPSILON};
+use crate::chatbot::{save_phi_memory, ChatBot, DEFAULT_TRAIN_EPOCHS, DEFAULT_TRAIN_EPSILON};
 
 pub(crate) fn run(bot: &mut ChatBot, rest: &str) -> io::Result<()> {
     let mut parts = rest.split_whitespace();
@@ -14,6 +14,7 @@ pub(crate) fn run(bot: &mut ChatBot, rest: &str) -> io::Result<()> {
         .unwrap_or(DEFAULT_TRAIN_EPSILON);
 
     bot.train(epochs, epsilon);
+    save_phi_memory(bot)?;
     println!(
         "trained {} examples into {} responses with {} word features",
         bot.example_count(),

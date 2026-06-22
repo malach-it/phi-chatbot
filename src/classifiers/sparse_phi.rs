@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::chatbot::WeightedFeature;
+use crate::chatbot::{ChatModelMode, WeightedFeature};
 
 use super::curve_plot::add_curve_points;
 use super::EncodedChatExample;
@@ -9,6 +9,16 @@ use super::EncodedChatExample;
 pub(crate) enum SparsePhiKind {
     Scalar,
     Curve,
+}
+
+impl SparsePhiKind {
+    pub(crate) fn for_mode(mode: ChatModelMode) -> Option<Self> {
+        match mode {
+            ChatModelMode::DenseCurve => None,
+            ChatModelMode::SparseScalar => Some(Self::Scalar),
+            ChatModelMode::SparseCurve => Some(Self::Curve),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -26,6 +36,24 @@ impl SparsePhiClassifier {
             weights: HashMap::new(),
             curves: HashMap::new(),
             learning_rate,
+            max_degree,
+            kind,
+        }
+    }
+
+    pub(super) fn from_snapshot(
+        kind: SparsePhiKind,
+        max_degree: usize,
+        state: SparsePhiSnapshotState,
+    ) -> Self {
+        Self {
+            weights: state.weights.into_iter().collect(),
+            curves: state
+                .curves
+                .into_iter()
+                .map(|(key, control_points)| (key, SparsePhiCurve { control_points }))
+                .collect(),
+            learning_rate: 0.08,
             max_degree,
             kind,
         }
@@ -101,6 +129,35 @@ impl SparsePhiClassifier {
             .sum()
     }
 
+    pub(super) fn write_phi_snapshot(&self, response_index: usize, output: &mut String) {
+        let mut weights = self.weights.iter().collect::<Vec<_>>();
+        weights.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+
+        for (term_key, value) in weights {
+            output.push_str(&format!(
+                "weight\t{response_index}\t{}\t{value:.12}\n",
+                format_index_list(term_key)
+            ));
+        }
+
+        let mut curves = self.curves.iter().collect::<Vec<_>>();
+        curves.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+
+        if !curves.is_empty() {
+            output.push_str(&format!(
+                "phi\t{response_index}\tsum\t{}\n",
+                merged_phi_expression(&curves)
+            ));
+        }
+    }
+
+    pub(super) fn merged_phi_expression(&self) -> String {
+        let mut curves = self.curves.iter().collect::<Vec<_>>();
+        curves.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+
+        merged_phi_expression(&curves)
+    }
+
     pub(super) fn aggregate_curve_points(&self) -> Option<Vec<f64>> {
         match self.kind {
             SparsePhiKind::Scalar => {
@@ -125,6 +182,77 @@ impl SparsePhiClassifier {
             }
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SparsePhiSnapshotState {
+    pub(crate) weights: Vec<(Vec<usize>, f64)>,
+    pub(crate) curves: Vec<(Vec<usize>, Vec<f64>)>,
+}
+
+pub(crate) fn ensure_sparse_state(states: &mut Vec<SparsePhiSnapshotState>, index: usize) {
+    while states.len() <= index {
+        states.push(SparsePhiSnapshotState::default());
+    }
+}
+
+pub(crate) fn remap_sparse_snapshot_states(
+    mut states: Vec<SparsePhiSnapshotState>,
+    snapshot_vocabulary: &[String],
+    snapshot_responses: &[String],
+    current_vocabulary: &[String],
+    current_responses: &[String],
+) -> Option<Vec<SparsePhiSnapshotState>> {
+    let mut remapped_states = (0..current_responses.len())
+        .map(|_| SparsePhiSnapshotState::default())
+        .collect::<Vec<_>>();
+
+    for response in snapshot_responses {
+        current_responses.binary_search(response).ok()?;
+    }
+
+    for snapshot_response_index in 0..snapshot_responses.len() {
+        let current_response_index = current_responses
+            .binary_search(&snapshot_responses[snapshot_response_index])
+            .ok()?;
+
+        if snapshot_response_index >= states.len() {
+            continue;
+        }
+
+        let state = std::mem::take(&mut states[snapshot_response_index]);
+
+        for (term_key, value) in state.weights {
+            remapped_states[current_response_index].weights.push((
+                remap_term_key(&term_key, snapshot_vocabulary, current_vocabulary)?,
+                value,
+            ));
+        }
+
+        for (term_key, points) in state.curves {
+            remapped_states[current_response_index].curves.push((
+                remap_term_key(&term_key, snapshot_vocabulary, current_vocabulary)?,
+                points,
+            ));
+        }
+    }
+
+    Some(remapped_states)
+}
+
+fn remap_term_key(
+    term_key: &[usize],
+    snapshot_vocabulary: &[String],
+    current_vocabulary: &[String],
+) -> Option<Vec<usize>> {
+    term_key
+        .iter()
+        .map(|index| {
+            snapshot_vocabulary
+                .get(*index)
+                .and_then(|feature| current_vocabulary.binary_search(feature).ok())
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -233,6 +361,17 @@ pub(crate) fn parse_index_list(encoded: &str) -> Option<Vec<usize>> {
         .collect()
 }
 
+pub(crate) fn parse_float_list(encoded: &str) -> Option<Vec<f64>> {
+    if encoded.is_empty() {
+        return Some(Vec::new());
+    }
+
+    encoded
+        .split(',')
+        .map(|value| value.parse::<f64>().ok())
+        .collect()
+}
+
 fn merged_phi_expression(curves: &[(&Vec<usize>, &SparsePhiCurve)]) -> String {
     curves
         .iter()
@@ -247,7 +386,7 @@ fn merged_phi_expression(curves: &[(&Vec<usize>, &SparsePhiCurve)]) -> String {
         .join(";")
 }
 
-fn parse_merged_phi_expression(encoded: &str) -> Option<Vec<(Vec<usize>, Vec<f64>)>> {
+pub(crate) fn parse_merged_phi_expression(encoded: &str) -> Option<Vec<(Vec<usize>, Vec<f64>)>> {
     if encoded.is_empty() {
         return Some(Vec::new());
     }
@@ -261,7 +400,7 @@ fn parse_merged_phi_expression(encoded: &str) -> Option<Vec<(Vec<usize>, Vec<f64
 
 type ResponseCurves = Vec<(usize, Vec<(Vec<usize>, Vec<f64>)>)>;
 
-fn parse_global_phi_expression(encoded: &str) -> Option<ResponseCurves> {
+pub(crate) fn parse_global_phi_expression(encoded: &str) -> Option<ResponseCurves> {
     if encoded.is_empty() {
         return Some(Vec::new());
     }
@@ -313,7 +452,7 @@ fn polynomial_formula(points: &[f64]) -> String {
     )
 }
 
-fn control_points_from_polynomial(encoded: &str) -> Option<Vec<f64>> {
+pub(crate) fn control_points_from_polynomial(encoded: &str) -> Option<Vec<f64>> {
     let coefficients = polynomial_coefficients_from_formula(encoded)?;
 
     if coefficients.is_empty() {
@@ -442,7 +581,7 @@ fn piecewise_linear_formula(points: &[f64]) -> String {
         .join(";")
 }
 
-fn control_points_from_piecewise_linear(encoded: &str) -> Option<Vec<f64>> {
+pub(crate) fn control_points_from_piecewise_linear(encoded: &str) -> Option<Vec<f64>> {
     let segments = encoded
         .split(';')
         .filter(|segment| !segment.is_empty())

@@ -3,7 +3,12 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::classifiers::{add_curve_points, draw_curve, ChatClassifier, EncodedChatExample};
+use crate::classifiers::{
+    add_curve_points, control_points_from_piecewise_linear, control_points_from_polynomial,
+    draw_curve, ensure_sparse_state, parse_float_list, parse_global_phi_expression,
+    parse_index_list, parse_merged_phi_expression, remap_sparse_snapshot_states, ChatClassifier,
+    EncodedChatExample, SparsePhiKind, SparsePhiSnapshotState,
+};
 use crate::commands::{self, CommandAction};
 
 pub(crate) const DEFAULT_TRAIN_EPOCHS: usize = 2_000;
@@ -17,6 +22,12 @@ const SESSION_CONTEXT_MIN_WEIGHT: f64 = 0.01;
 const CONTEXT_FEATURE_BOOST: f64 = 1.5;
 const CONTEXT_MEMORY_BONUS: f64 = 0.10;
 pub(crate) const MEMORY_PATH: &str = "data/chatbot_memory.tsv";
+const SPARSE_CURVE_PHI_MEMORY_PATH: &str = "data/chatbot_phi_all.tsv";
+const PHI_MEMORY_VERSION: &str = "phinetwork-chatbot-phi-v5";
+const LEGACY_PHI_MEMORY_V4: &str = "phinetwork-chatbot-phi-v4";
+const LEGACY_PHI_MEMORY_V3: &str = "phinetwork-chatbot-phi-v3";
+const LEGACY_PHI_MEMORY_V2: &str = "phinetwork-chatbot-phi-v2";
+const LEGACY_PHI_MEMORY_V1: &str = "phinetwork-chatbot-phi-v1";
 
 #[derive(Debug)]
 pub struct ChatBot {
@@ -116,6 +127,11 @@ impl ChatBot {
                 )
             })
             .collect();
+    }
+
+    fn prepare_model_shape(&mut self) {
+        self.rebuild_vocabulary();
+        self.rebuild_responses();
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -320,6 +336,190 @@ impl ChatBot {
         output
     }
 
+    fn phi_snapshot(&self) -> Option<String> {
+        match self.mode {
+            ChatModelMode::DenseCurve => None,
+            ChatModelMode::SparseScalar | ChatModelMode::SparseCurve => {
+                let mut output = String::new();
+                output.push_str(&format!("{PHI_MEMORY_VERSION}\n"));
+                output.push_str(&format!("mode\t{}\n", self.mode.name()));
+                output.push_str(&format!("max_degree\t{}\n", self.max_degree));
+
+                for feature in &self.vocabulary {
+                    output.push_str(&format!("vocab\t{}\n", escape_tsv(feature)));
+                }
+
+                for response in &self.responses {
+                    output.push_str(&format!("response\t{}\n", escape_tsv(response)));
+                }
+
+                if self.mode == ChatModelMode::SparseCurve {
+                    output.push_str(&format!(
+                        "phi\tall\tsum\t{}\n",
+                        self.merged_phi_snapshot_expression()?
+                    ));
+                } else {
+                    for (response_index, classifier) in self.classifiers.iter().enumerate() {
+                        classifier.write_phi_snapshot(response_index, &mut output)?;
+                    }
+                }
+
+                Some(output)
+            }
+        }
+    }
+
+    fn merged_phi_snapshot_expression(&self) -> Option<String> {
+        let mut parts = Vec::new();
+
+        for (response_index, classifier) in self.classifiers.iter().enumerate() {
+            let expression = classifier.merged_phi_expression()?;
+            if !expression.is_empty() {
+                parts.push(format!("response[{response_index}]{{{expression}}}"));
+            }
+        }
+
+        Some(parts.join("||"))
+    }
+
+    fn apply_phi_snapshot(&mut self, snapshot: &str) -> bool {
+        let mut lines = snapshot.lines();
+        let Some(version) = lines.next() else {
+            return false;
+        };
+
+        if version != PHI_MEMORY_VERSION
+            && version != LEGACY_PHI_MEMORY_V4
+            && version != LEGACY_PHI_MEMORY_V3
+            && version != LEGACY_PHI_MEMORY_V2
+            && version != LEGACY_PHI_MEMORY_V1
+        {
+            return false;
+        }
+
+        let mut mode = None;
+        let mut max_degree = None;
+        let mut vocabulary = Vec::new();
+        let mut responses = Vec::new();
+        let mut sparse_states = Vec::<SparsePhiSnapshotState>::new();
+
+        for line in lines {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            match fields.as_slice() {
+                ["mode", value] => mode = ChatModelMode::parse(value),
+                ["max_degree", value] => max_degree = value.parse::<usize>().ok(),
+                ["vocab", value] => vocabulary.push(unescape_tsv(value)),
+                ["response", value] => responses.push(unescape_tsv(value)),
+                ["weight", response_index, term_key, value] => {
+                    let Some(response_index) = response_index.parse::<usize>().ok() else {
+                        return false;
+                    };
+                    let Some(term_key) = parse_index_list(term_key) else {
+                        return false;
+                    };
+                    let Some(value) = value.parse::<f64>().ok() else {
+                        return false;
+                    };
+                    ensure_sparse_state(&mut sparse_states, response_index);
+                    sparse_states[response_index]
+                        .weights
+                        .push((term_key, value));
+                }
+                ["curve", response_index, term_key, points] => {
+                    let Some(response_index) = response_index.parse::<usize>().ok() else {
+                        return false;
+                    };
+                    let Some(term_key) = parse_index_list(term_key) else {
+                        return false;
+                    };
+                    let Some(points) = parse_float_list(points) else {
+                        return false;
+                    };
+                    ensure_sparse_state(&mut sparse_states, response_index);
+                    sparse_states[response_index]
+                        .curves
+                        .push((term_key, points));
+                }
+                ["curve", response_index, term_key, "pwl", formula] => {
+                    let Some(response_index) = response_index.parse::<usize>().ok() else {
+                        return false;
+                    };
+                    let Some(term_key) = parse_index_list(term_key) else {
+                        return false;
+                    };
+                    let Some(points) = control_points_from_piecewise_linear(formula) else {
+                        return false;
+                    };
+                    ensure_sparse_state(&mut sparse_states, response_index);
+                    sparse_states[response_index]
+                        .curves
+                        .push((term_key, points));
+                }
+                ["curve", response_index, term_key, "poly", formula] => {
+                    let Some(response_index) = response_index.parse::<usize>().ok() else {
+                        return false;
+                    };
+                    let Some(term_key) = parse_index_list(term_key) else {
+                        return false;
+                    };
+                    let Some(points) = control_points_from_polynomial(formula) else {
+                        return false;
+                    };
+                    ensure_sparse_state(&mut sparse_states, response_index);
+                    sparse_states[response_index]
+                        .curves
+                        .push((term_key, points));
+                }
+                ["phi", "all", "sum", expression] => {
+                    let Some(response_curves) = parse_global_phi_expression(expression) else {
+                        return false;
+                    };
+
+                    for (response_index, curves) in response_curves {
+                        ensure_sparse_state(&mut sparse_states, response_index);
+                        sparse_states[response_index].curves.extend(curves);
+                    }
+                }
+                ["phi", response_index, "sum", expression] => {
+                    let Some(response_index) = response_index.parse::<usize>().ok() else {
+                        return false;
+                    };
+                    let Some(curves) = parse_merged_phi_expression(expression) else {
+                        return false;
+                    };
+                    ensure_sparse_state(&mut sparse_states, response_index);
+                    sparse_states[response_index].curves.extend(curves);
+                }
+                _ => return false,
+            }
+        }
+
+        if mode != Some(self.mode) || max_degree != Some(self.max_degree) {
+            return false;
+        }
+
+        let Some(kind) = SparsePhiKind::for_mode(self.mode) else {
+            return false;
+        };
+
+        let Some(sparse_states) = remap_sparse_snapshot_states(
+            sparse_states,
+            &vocabulary,
+            &responses,
+            &self.vocabulary,
+            &self.responses,
+        ) else {
+            return false;
+        };
+
+        self.classifiers = sparse_states
+            .into_iter()
+            .map(|state| ChatClassifier::from_sparse_snapshot(kind, self.max_degree, state))
+            .collect();
+
+        true
+    }
+
     fn rebuild_vocabulary(&mut self) {
         let mut words = BTreeSet::new();
 
@@ -418,6 +618,15 @@ impl ChatModelMode {
             Self::DenseCurve => "dense curve",
             Self::SparseScalar => "sparse scalar",
             Self::SparseCurve => "sparse curve",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dense curve" => Some(Self::DenseCurve),
+            "sparse scalar" => Some(Self::SparseScalar),
+            "sparse curve" => Some(Self::SparseCurve),
+            _ => None,
         }
     }
 }
@@ -631,6 +840,60 @@ fn load_examples_from_file(bot: &mut ChatBot, path: impl AsRef<Path>) -> io::Res
     Ok(add_examples_from_tsv(bot, &contents))
 }
 
+fn load_phi_memory_from_file(bot: &mut ChatBot, path: impl AsRef<Path>) -> io::Result<bool> {
+    let path = path.as_ref();
+
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let contents = fs::read_to_string(path)?;
+    Ok(bot.apply_phi_snapshot(&contents))
+}
+
+fn load_phi_memory(bot: &mut ChatBot) -> io::Result<Option<String>> {
+    let primary_path = phi_memory_path(bot.mode());
+
+    if load_phi_memory_from_file(bot, primary_path)? {
+        return Ok(Some(primary_path.to_string()));
+    }
+
+    Ok(None)
+}
+
+fn save_phi_memory_to_file(bot: &ChatBot, path: impl AsRef<Path>) -> io::Result<bool> {
+    let Some(snapshot) = bot.phi_snapshot() else {
+        return Ok(false);
+    };
+
+    let path = path.as_ref();
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(path, snapshot)?;
+    Ok(true)
+}
+
+pub(crate) fn save_phi_memory(bot: &ChatBot) -> io::Result<Option<String>> {
+    let path = phi_memory_path(bot.mode());
+
+    if save_phi_memory_to_file(bot, path)? {
+        Ok(Some(path.to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn phi_memory_path(mode: ChatModelMode) -> &'static str {
+    match mode {
+        ChatModelMode::DenseCurve => SPARSE_CURVE_PHI_MEMORY_PATH,
+        ChatModelMode::SparseCurve => SPARSE_CURVE_PHI_MEMORY_PATH,
+        ChatModelMode::SparseScalar => SPARSE_CURVE_PHI_MEMORY_PATH,
+    }
+}
+
 pub(crate) fn append_example_to_file(
     path: impl AsRef<Path>,
     message: &str,
@@ -738,7 +1001,14 @@ pub fn run_chatbot_cli() -> io::Result<()> {
     let mut session_context = SessionContext::default();
     let memory_load = load_examples_from_file(&mut bot, MEMORY_PATH)?;
 
-    bot.train(DEFAULT_TRAIN_EPOCHS, DEFAULT_TRAIN_EPSILON);
+    bot.prepare_model_shape();
+    let loaded_phi_memory_path = load_phi_memory(&mut bot)?;
+    let saved_phi_memory_path = if loaded_phi_memory_path.is_none() {
+        bot.train(DEFAULT_TRAIN_EPOCHS, DEFAULT_TRAIN_EPSILON);
+        save_phi_memory(&bot)?
+    } else {
+        save_phi_memory(&bot)?
+    };
 
     println!("PhiNetwork chatbot");
     println!("model: {}", bot.mode().name());
@@ -752,8 +1022,12 @@ pub fn run_chatbot_cli() -> io::Result<()> {
         "loaded {} remembered examples from {MEMORY_PATH}",
         memory_load.added
     );
-    if bot.mode() == ChatModelMode::DenseCurve {
+    if let Some(path) = &loaded_phi_memory_path {
+        println!("loaded learned phi state from {path}");
+    } else if bot.mode() == ChatModelMode::DenseCurve {
         println!("dense curve mode retrains from examples at startup");
+    } else if let Some(path) = &saved_phi_memory_path {
+        println!("rebuilt learned phi state into {path}");
     }
     commands::help::run();
 
@@ -849,6 +1123,7 @@ pub(crate) fn answer_or_learn(
     if bot.add_example_with_context_if_missing(message, response, context_features.clone()) {
         append_example_to_file(MEMORY_PATH, message, response, &context_features)?;
         bot.train(DEFAULT_TRAIN_EPOCHS, DEFAULT_TRAIN_EPSILON);
+        save_phi_memory(bot)?;
         session_context.record_turn(message, Some(response));
         println!(
             "learned. trained {} examples into {} responses with {} word features",
@@ -1185,6 +1460,38 @@ mod tests {
             format_context_features(bot.examples()[0].context_features()),
             "msg:previous=0.150000"
         );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn persists_and_reloads_phi_snapshot() {
+        let path = std::env::temp_dir().join("phinetwork_chatbot_phi_test.tsv");
+        let _ = fs::remove_file(&path);
+
+        let mut trained = ChatBot::new();
+        trained.add_example("rust borrow checker", "Rust answer");
+        trained.add_example("pizza tomato basil", "Pizza answer");
+        trained.train(2_000, 0.01);
+
+        let before = trained.reply("borrow checker").expect("before prediction");
+        assert_eq!(before.response, "Rust answer");
+        assert!(save_phi_memory_to_file(&trained, &path).unwrap());
+        let snapshot = fs::read_to_string(&path).unwrap();
+        assert!(snapshot.starts_with(PHI_MEMORY_VERSION));
+        assert!(snapshot.contains("\tsum\tresponse["));
+        assert!(snapshot.contains("term["));
+        assert!(snapshot.contains("{y="));
+
+        let mut loaded = ChatBot::new();
+        loaded.add_example("rust borrow checker", "Rust answer");
+        loaded.add_example("pizza tomato basil", "Pizza answer");
+        loaded.prepare_model_shape();
+
+        assert!(load_phi_memory_from_file(&mut loaded, &path).unwrap());
+        let after = loaded.reply("borrow checker").expect("after prediction");
+
+        assert_eq!(after.response, before.response);
 
         let _ = fs::remove_file(&path);
     }
