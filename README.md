@@ -38,8 +38,8 @@ quit                         exit
 
 Plain text without a command is treated like `ask <message>`.
 
-If the chatbot is not confident enough, it asks for the right response and trains from that answer.
-When an answer is confident, recursion scores each candidate with `phi(a) + phi(phi(a)) + phi(a * phi(a))`: the prompt, the candidate result as input, and the prompt with candidate-result interaction context. It prints each confident intermediate result until the next score drops below the confidence threshold, repeats, or reaches the recursion cap.
+If the chatbot is not confident enough, it asks for the right response and remembers that answer. Run `train` to rebuild the learned phi state from remembered examples.
+When an answer is confident, recursion feeds that answer back as the next prompt and prints each confident memorized transition. It stops when the next answer is low confidence, repeats, lacks an exact remembered transition from the previous answer, or reaches the recursion cap.
 
 ## Example Session
 
