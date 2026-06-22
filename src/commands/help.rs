@@ -5,6 +5,7 @@ pub(crate) fn run() {
     println!("  train [epochs] [epsilon]     rebuild and train the chatbot");
     println!("  ask <message>                ask the trained chatbot");
     println!("                               low-confidence answers prompt for training");
+    println!("  suggest [limit] <message>    list likely replies from remembered examples");
     println!("  examples                     list training examples");
     println!("  responses                    list learned response classes");
     println!("  clear context                forget accumulated session phi terms");

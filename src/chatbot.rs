@@ -235,6 +235,83 @@ impl ChatBot {
         self.mode
     }
 
+    pub fn suggest(&self, message: &str, limit: usize) -> Vec<ChatSuggestion> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let query_terms = tokenize(message).into_iter().collect::<BTreeSet<_>>();
+        if query_terms.is_empty() {
+            return Vec::new();
+        }
+
+        let prediction_scores = self
+            .classifiers
+            .iter()
+            .zip(&self.responses)
+            .map(|(classifier, response)| {
+                let features = self.features_with_context(message, &[]);
+                (
+                    response.as_str(),
+                    classifier.predict(&features, self.vocabulary.len()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut by_response = HashMap::<String, ChatSuggestion>::new();
+
+        for example in &self.examples {
+            let example_terms = tokenize(&example.message)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let overlap = query_terms.intersection(&example_terms).count();
+            if overlap == 0 {
+                continue;
+            }
+
+            let union = query_terms.union(&example_terms).count();
+            let lexical_score = overlap as f64 / union.max(1) as f64;
+            let model_score = prediction_scores
+                .get(example.response.as_str())
+                .copied()
+                .filter(|score| score.is_finite())
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let score = (lexical_score * 0.75) + (model_score * 0.25);
+
+            let suggestion = by_response
+                .entry(example.response.clone())
+                .or_insert_with(|| ChatSuggestion {
+                    response: example.response.clone(),
+                    matched_example: example.message.clone(),
+                    score,
+                    overlap,
+                });
+
+            if score > suggestion.score
+                || (score == suggestion.score && overlap > suggestion.overlap)
+                || (score == suggestion.score
+                    && overlap == suggestion.overlap
+                    && example.message < suggestion.matched_example)
+            {
+                suggestion.matched_example = example.message.clone();
+                suggestion.score = score;
+                suggestion.overlap = overlap;
+            }
+        }
+
+        let mut suggestions = by_response.into_values().collect::<Vec<_>>();
+        suggestions.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| right.overlap.cmp(&left.overlap))
+                .then_with(|| left.response.cmp(&right.response))
+        });
+        suggestions.truncate(limit);
+        suggestions
+    }
+
     fn dense_curve_report(&self) -> Option<String> {
         if self.mode != ChatModelMode::DenseCurve {
             return None;
@@ -676,6 +753,14 @@ impl ChatExample {
 pub struct ChatPrediction {
     pub response: String,
     pub score: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatSuggestion {
+    pub response: String,
+    pub matched_example: String,
+    pub score: f64,
+    pub overlap: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1294,6 +1379,38 @@ mod tests {
         let prediction = bot.reply("zebra nebula capacitor");
 
         assert!(needs_training(prediction.as_ref()));
+    }
+
+    #[test]
+    fn suggests_responses_from_similar_examples() {
+        let mut bot = ChatBot::new();
+        bot.add_example("oauth token lifecycle", "Authorization server");
+        bot.add_example("passkey webauthn registration", "Identity provider");
+        bot.train(500, 0.01);
+
+        let suggestions = bot.suggest("oauth tokens", 3);
+
+        assert_eq!(suggestions[0].response, "Authorization server");
+        assert_eq!(suggestions[0].matched_example, "oauth token lifecycle");
+    }
+
+    #[test]
+    fn suggestions_ignore_empty_messages() {
+        let mut bot = ChatBot::new();
+        bot.add_example("oauth token lifecycle", "Authorization server");
+
+        assert!(bot.suggest("   ", 3).is_empty());
+        assert!(bot.suggest("oauth", 0).is_empty());
+    }
+
+    #[test]
+    fn suggestions_keep_scores_finite_without_trained_model() {
+        let mut bot = ChatBot::new();
+        bot.add_example("administration interface", "Administration interface");
+
+        let suggestions = bot.suggest("administration", 1);
+
+        assert!(suggestions[0].score.is_finite());
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub(crate) mod curve;
 pub(crate) mod examples;
 pub(crate) mod help;
 pub(crate) mod responses;
+pub(crate) mod suggest;
 pub(crate) mod tokens;
 pub(crate) mod train;
 pub(crate) mod vocab;
@@ -39,6 +40,12 @@ pub(crate) fn dispatch(
         Ok(CommandAction::Continue)
     } else if let Some(message) = line.strip_prefix("ask ") {
         ask::run(bot, session_context, message)?;
+        Ok(CommandAction::Continue)
+    } else if line == "suggest" {
+        suggest::run(bot, "");
+        Ok(CommandAction::Continue)
+    } else if let Some(rest) = line.strip_prefix("suggest ") {
+        suggest::run(bot, rest);
         Ok(CommandAction::Continue)
     } else if line == "examples" {
         examples::run(bot);

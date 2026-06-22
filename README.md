@@ -26,6 +26,7 @@ Press Enter to use the default sparse curve mode.
 add <message> => <reply>     add one training example and save it
 train [epochs] [epsilon]     rebuild and train the chatbot
 ask <message>                ask the trained chatbot
+suggest [limit] <message>    list likely replies from remembered examples
 examples                     list training examples
 responses                    list learned response classes
 clear context                forget accumulated session phi terms
