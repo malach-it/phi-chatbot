@@ -32,7 +32,7 @@ pub(crate) fn dispatch(
         clear_context::run(session_context);
         Ok(CommandAction::Continue)
     } else if let Some(rest) = line.strip_prefix("add ") {
-        add::run(bot, rest)?;
+        add::run(bot, session_context, rest)?;
         Ok(CommandAction::Continue)
     } else if let Some(rest) = line.strip_prefix("train") {
         train::run(bot, rest)?;

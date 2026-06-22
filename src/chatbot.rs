@@ -73,11 +73,7 @@ impl ChatBot {
         });
     }
 
-    pub(crate) fn add_example_if_missing(&mut self, message: &str, response: &str) -> bool {
-        self.add_example_with_context_if_missing(message, response, Vec::new())
-    }
-
-    fn add_example_with_context_if_missing(
+    pub(crate) fn add_example_with_context_if_missing(
         &mut self,
         message: &str,
         response: &str,
@@ -688,7 +684,7 @@ pub struct SessionContext {
 }
 
 impl SessionContext {
-    fn context_features(&self) -> Vec<ContextFeature> {
+    pub(crate) fn context_features(&self) -> Vec<ContextFeature> {
         normalized_context_features(
             self.features
                 .iter()

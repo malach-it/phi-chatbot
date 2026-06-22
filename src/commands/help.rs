@@ -1,7 +1,7 @@
 pub(crate) fn run() {
     println!("commands:");
     println!("  add <message> => <reply>     add one training example");
-    println!("                               also saves it to persistent memory");
+    println!("                               includes current context and saves it");
     println!("  train [epochs] [epsilon]     rebuild and train the chatbot");
     println!("  ask <message>                ask the trained chatbot");
     println!("                               low-confidence answers prompt for training");
