@@ -184,39 +184,6 @@ impl ChatBot {
             .max_by(|left, right| left.score.total_cmp(&right.score))
     }
 
-    fn reply_with_recursive_formula(
-        &self,
-        message: &str,
-        session_context: &SessionContext,
-    ) -> Option<ChatPrediction> {
-        if self.classifiers.is_empty() {
-            return None;
-        }
-
-        let base_context_features = session_context.context_features();
-        let base_features = self.features_with_context(message, &base_context_features);
-
-        self.classifiers
-            .iter()
-            .zip(&self.responses)
-            .map(|(classifier, response)| {
-                let mut interaction_context = session_context.clone();
-                interaction_context.add_text(response, SESSION_CONTEXT_RESULT_WEIGHT);
-                let interaction_features =
-                    self.features_with_context(message, &interaction_context.context_features());
-                let result_features = self.features_with_context(response, &base_context_features);
-
-                ChatPrediction {
-                    response: response.clone(),
-                    score: classifier.predict(&base_features, self.vocabulary.len())
-                        + classifier.predict(&result_features, self.vocabulary.len())
-                        + classifier.predict(&interaction_features, self.vocabulary.len())
-                        + self.context_memory_bonus(response, &interaction_features),
-                }
-            })
-            .max_by(|left, right| left.score.total_cmp(&right.score))
-    }
-
     fn context_memory_bonus(&self, response: &str, features: &[WeightedFeature]) -> f64 {
         self.examples
             .iter()
@@ -590,6 +557,18 @@ impl ChatBot {
                 }
             })
             .collect()
+    }
+
+    fn has_exact_example_transition(&self, message: &str, response: &str) -> bool {
+        let message_tokens = tokenize(message).into_iter().collect::<BTreeSet<_>>();
+
+        self.examples.iter().any(|example| {
+            example.response == response
+                && tokenize(&example.message)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+                    == message_tokens
+        })
     }
 }
 
@@ -1154,8 +1133,8 @@ fn recursive_prediction_chain(
     let mut seen_responses = BTreeSet::new();
     let mut confident = Vec::new();
 
-    for _ in 0..MAX_RECURSIVE_RESULT_DEPTH {
-        let Some(prediction) = bot.reply_with_recursive_formula(&input, &context) else {
+    for depth in 0..MAX_RECURSIVE_RESULT_DEPTH {
+        let Some(prediction) = bot.reply_with_session_context_base(&input, &context) else {
             return PredictionChain {
                 confident,
                 terminal: None,
@@ -1163,13 +1142,21 @@ fn recursive_prediction_chain(
         };
 
         if needs_training(Some(&prediction)) {
+            let terminal = confident.is_empty().then_some(prediction);
             return PredictionChain {
                 confident,
-                terminal: Some(prediction),
+                terminal,
             };
         }
 
         let response = prediction.response.clone();
+        if depth > 0 && !bot.has_exact_example_transition(&input, &response) {
+            return PredictionChain {
+                confident,
+                terminal: None,
+            };
+        }
+
         context.record_turn(&input, Some(&response));
         confident.push(prediction);
 
@@ -1402,29 +1389,17 @@ mod tests {
     }
 
     #[test]
-    fn recursive_formula_scores_result_and_prompt_result_interaction() {
+    fn recursive_chain_stops_without_exact_follow_up_transition() {
         let mut bot = ChatBot::new();
-        bot.add_example("rust borrow checker", "Rust answer");
-        bot.add_example("Rust answer", "Rust follow up");
-        bot.add_example_with_context(
-            "rust borrow checker",
-            "Rust follow up",
-            vec![ContextFeature {
-                name: "msg:rust".to_string(),
-                value: SESSION_CONTEXT_RESULT_WEIGHT,
-            }],
-        );
-        bot.add_example("pizza tomato basil", "Pizza answer");
+        bot.add_example("installation", "installing");
+        bot.add_example("westerly", "prevailing westerly");
         bot.train(2_000, 0.01);
 
-        let base = bot
-            .reply_with_session_context_base("rust borrow checker", &SessionContext::default())
-            .expect("base prediction");
-        let recursive = bot
-            .reply_with_recursive_formula("rust borrow checker", &SessionContext::default())
-            .expect("recursive prediction");
+        let chain = recursive_prediction_chain(&bot, &SessionContext::default(), "installation");
 
-        assert!(recursive.score >= base.score);
+        assert_eq!(chain.confident.len(), 1);
+        assert_eq!(chain.confident[0].response, "installing");
+        assert!(chain.terminal.is_none());
     }
 
     #[test]
