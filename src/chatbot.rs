@@ -1101,15 +1101,8 @@ pub(crate) fn answer_or_learn(
 
     if bot.add_example_with_context_if_missing(message, response, context_features.clone()) {
         append_example_to_file(MEMORY_PATH, message, response, &context_features)?;
-        bot.train(DEFAULT_TRAIN_EPOCHS, DEFAULT_TRAIN_EPSILON);
-        save_phi_memory(bot)?;
         session_context.record_turn(message, Some(response));
-        println!(
-            "learned. trained {} examples into {} responses with {} word features",
-            bot.example_count(),
-            bot.responses().len(),
-            bot.vocabulary().len()
-        );
+        println!("remembered example. Run `train` to update the model.");
     } else {
         println!("that example already exists");
     }
