@@ -51,8 +51,8 @@ impl DenseCurveClassifier {
         let mut aggregate = None::<Vec<f64>>;
 
         for term_index in 0..self.network.term_count() {
-            if let Some(points) = self.network.weighted_curve_points(term_index) {
-                add_curve_points(&mut aggregate, &points);
+            if let Some(points) = self.network.curve_points(term_index) {
+                add_curve_points(&mut aggregate, points);
             }
         }
 
