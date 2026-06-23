@@ -2,19 +2,21 @@
 pub struct PhiNetwork {
     input_size: usize,
     terms: Vec<PhiTerm>,
-    curves: Vec<PhiCurve>,
+    term_weights: Vec<f64>,
+    curve: PhiCurve,
     learning_rate: f64,
-    curve_knots: usize,
 }
+
+const DEFAULT_CURVE_KNOTS: usize = 8;
 
 impl PhiNetwork {
     pub fn new(input_size: usize, learning_rate: f64) -> Self {
         Self {
             input_size,
             terms: Vec::new(),
-            curves: Vec::new(),
+            term_weights: Vec::new(),
+            curve: PhiCurve::new(DEFAULT_CURVE_KNOTS),
             learning_rate,
-            curve_knots: 8,
         }
     }
 
@@ -109,19 +111,34 @@ impl PhiNetwork {
             .map(|term| term.input_indices.as_slice())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn curve_points(&self, index: usize) -> Option<&[f64]> {
-        self.curves
+        self.terms
             .get(index)
-            .map(|curve| curve.control_points.as_slice())
+            .map(|_| self.curve.control_points.as_slice())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn weighted_curve_points(&self, index: usize) -> Option<Vec<f64>> {
+        let weight = self.term_weights.get(index)?;
+
+        Some(
+            self.curve
+                .control_points
+                .iter()
+                .map(|point| point * weight)
+                .collect(),
+        )
     }
 
     fn train_one_cached(&mut self, phi_inputs: &[CachedPhiInput], target: f64) {
         let prediction = self.predict_from_cached_phi_inputs(phi_inputs);
         let error = target - prediction;
 
-        for (curve, phi_input) in self.curves.iter_mut().zip(phi_inputs) {
-            curve.train(phi_input, error, self.learning_rate);
+        for (weight, phi_input) in self.term_weights.iter_mut().zip(phi_inputs) {
+            let phi_value = self.curve.value_cached(phi_input);
+            self.curve
+                .train_weighted(phi_input, error, *weight, self.learning_rate);
+            *weight += self.learning_rate * error * phi_value;
         }
     }
 
@@ -144,7 +161,7 @@ impl PhiNetwork {
             self.terms.push(PhiTerm {
                 input_indices: indices.clone(),
             });
-            self.curves.push(PhiCurve::new(self.curve_knots));
+            self.term_weights.push(1.0);
             return;
         }
 
@@ -176,16 +193,15 @@ impl PhiNetwork {
     fn cached_phi_inputs(&self, inputs: &[f64]) -> Vec<CachedPhiInput> {
         self.terms
             .iter()
-            .zip(&self.curves)
-            .map(|(term, curve)| curve.cache_input(term.value(inputs)))
+            .map(|term| self.curve.cache_input(term.value(inputs)))
             .collect()
     }
 
     fn predict_from_cached_phi_inputs(&self, phi_inputs: &[CachedPhiInput]) -> f64 {
-        self.curves
+        self.term_weights
             .iter()
             .zip(phi_inputs)
-            .map(|(curve, phi_input)| curve.value_cached(phi_input))
+            .map(|(weight, phi_input)| weight * self.curve.value_cached(phi_input))
             .sum()
     }
 }
@@ -228,12 +244,18 @@ impl PhiCurve {
         input.gate * interpolated
     }
 
-    fn train(&mut self, input: &CachedPhiInput, error: f64, learning_rate: f64) {
+    fn train_weighted(
+        &mut self,
+        input: &CachedPhiInput,
+        error: f64,
+        weight: f64,
+        learning_rate: f64,
+    ) {
         let lower_gradient = input.gate * input.lower_weight;
         let upper_gradient = input.gate * input.upper_weight;
 
-        self.control_points[input.lower_index] += learning_rate * error * lower_gradient;
-        self.control_points[input.upper_index] += learning_rate * error * upper_gradient;
+        self.control_points[input.lower_index] += learning_rate * error * weight * lower_gradient;
+        self.control_points[input.upper_index] += learning_rate * error * weight * upper_gradient;
     }
 }
 
@@ -341,6 +363,8 @@ mod tests {
         assert!(network.train_until(&training_data, 0.01, 10_000));
         assert_eq!(network.term_count(), 3);
         assert_eq!(network.term_indices(2), Some(&[0, 1][..]));
+        assert_eq!(network.curve_points(0), network.curve_points(1));
+        assert_eq!(network.curve_points(1), network.curve_points(2));
 
         for example in training_data {
             let prediction = network.predict(&example.inputs);
