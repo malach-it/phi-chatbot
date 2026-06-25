@@ -10,6 +10,7 @@ use crate::classifiers::{
     EncodedChatExample, SparsePhiKind, SparsePhiSnapshotState,
 };
 use crate::commands::{self, CommandAction};
+use crate::phi_key::{encoded_phi_points_from_points, PhiKeyError, PhiKeyPair};
 
 pub(crate) const DEFAULT_TRAIN_EPOCHS: usize = 2_000;
 pub(crate) const DEFAULT_TRAIN_EPSILON: f64 = 0.02;
@@ -317,19 +318,9 @@ impl ChatBot {
             return None;
         }
 
-        let mut global_curve = None::<Vec<f64>>;
-
-        for classifier in &self.classifiers {
-            let Some(points) = classifier.aggregate_curve_points() else {
-                continue;
-            };
-
-            add_curve_points(&mut global_curve, &points);
-        }
-
         let mut output = String::new();
 
-        if let Some(points) = global_curve {
+        if let Some(points) = self.phi_all_curve_points() {
             output.push_str("phi_all\n");
             output.push_str(&draw_curve(&points, 48));
             output.push('\n');
@@ -350,7 +341,15 @@ impl ChatBot {
         }
     }
 
-    fn sparse_phi_curve_report(&self) -> String {
+    pub(crate) fn phi_all_key_pair(&self, share_count: usize) -> Result<PhiKeyPair, PhiKeyError> {
+        let Some(points) = self.phi_all_curve_points() else {
+            return Err(PhiKeyError::EmptyPhiAll);
+        };
+
+        PhiKeyPair::from_phi_all_points(&points, share_count)
+    }
+
+    fn phi_all_curve_points(&self) -> Option<Vec<f64>> {
         let mut global_curve = None::<Vec<f64>>;
 
         for classifier in &self.classifiers {
@@ -361,9 +360,13 @@ impl ChatBot {
             add_curve_points(&mut global_curve, &points);
         }
 
+        global_curve
+    }
+
+    fn sparse_phi_curve_report(&self) -> String {
         let mut output = String::new();
 
-        if let Some(points) = global_curve {
+        if let Some(points) = self.phi_all_curve_points() {
             output.push_str("phi_all\n");
             output.push_str(&draw_curve(&points, 48));
             output.push('\n');
@@ -404,9 +407,26 @@ impl ChatBot {
                     }
                 }
 
+                if let Some(encoded_phi) = self.encoded_phi_all_snapshot_expression() {
+                    output.push_str(&format!("phi\tall\tencoded\t{encoded_phi}\n"));
+                }
+
                 Some(output)
             }
         }
+    }
+
+    fn encoded_phi_all_snapshot_expression(&self) -> Option<String> {
+        let points = self.phi_all_curve_points()?;
+        let encoded_points = encoded_phi_points_from_points(&points).ok()?;
+
+        Some(
+            encoded_points
+                .into_iter()
+                .map(|(index, point)| format!("{index}:{point}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        )
     }
 
     fn merged_phi_snapshot_expression(&self) -> Option<String> {
@@ -519,6 +539,9 @@ impl ChatBot {
                         ensure_sparse_state(&mut sparse_states, response_index);
                         sparse_states[response_index].curves.extend(curves);
                     }
+                }
+                ["phi", "all", "encoded", _encoded_points] => {
+                    // Stored for inspection/export. The trainable sparse state above remains authoritative.
                 }
                 ["phi", response_index, "sum", expression] => {
                     let Some(response_index) = response_index.parse::<usize>().ok() else {
@@ -1549,6 +1572,7 @@ mod tests {
         let snapshot = fs::read_to_string(&path).unwrap();
         assert!(snapshot.starts_with(PHI_MEMORY_VERSION));
         assert!(snapshot.contains("\tsum\tresponse["));
+        assert!(snapshot.contains("phi\tall\tencoded\t"));
         assert!(snapshot.contains("term["));
         assert!(snapshot.contains("{y="));
 

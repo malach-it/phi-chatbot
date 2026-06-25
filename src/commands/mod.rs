@@ -8,6 +8,7 @@ pub(crate) mod clear_context;
 pub(crate) mod curve;
 pub(crate) mod examples;
 pub(crate) mod help;
+pub(crate) mod keypair;
 pub(crate) mod responses;
 pub(crate) mod suggest;
 pub(crate) mod tokens;
@@ -55,6 +56,18 @@ pub(crate) fn dispatch(
         Ok(CommandAction::Continue)
     } else if line == "curve" {
         curve::run(bot);
+        Ok(CommandAction::Continue)
+    } else if line == "keypair" {
+        keypair::run(bot, "");
+        Ok(CommandAction::Continue)
+    } else if let Some(rest) = line.strip_prefix("keypair ") {
+        keypair::run(bot, rest);
+        Ok(CommandAction::Continue)
+    } else if line == "phi keypair" {
+        keypair::run(bot, "");
+        Ok(CommandAction::Continue)
+    } else if let Some(rest) = line.strip_prefix("phi keypair ") {
+        keypair::run(bot, rest);
         Ok(CommandAction::Continue)
     } else if let Some(message) = line.strip_prefix("tokens ") {
         tokens::run(message);

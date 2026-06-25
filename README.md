@@ -31,6 +31,7 @@ examples                     list training examples
 responses                    list learned response classes
 clear context                forget accumulated session phi terms
 curve                        draw the learned overall phi curve
+keypair [shares]             print encoded phi and encrypted phin shares
 tokens <message>             show word tokens for a message
 vocab                        list bag-of-words features
 help                         show command help
@@ -65,7 +66,9 @@ data/chatbot_memory.tsv       remembered training examples
 data/chatbot_phi_all.tsv      learned phi state
 ```
 
-Memory examples are loaded on startup. Sparse phi state is also loaded on startup when compatible with the selected mode.
+Memory examples are loaded on startup. Sparse phi state is also loaded on startup when compatible with the selected mode. The phi state also stores an encoded `phi_all` export line for inspection.
+
+The `keypair [shares]` command is inspired by BLS12-381 key material and curve points, but it is an application-specific encoding of `phi_all` points. It prints the direct encoded `phi_all` points, then `n` encrypted phin shares whose component formulas show how each share is composed, for example `phi(a) + phi(ab) + phi(ac)` when `n = 3`. The encrypted phin shares are masked additive shares: all `n` unmasked shares combine to recover encoded `phi_all`. It should not be treated as a standard BLS signature key, wallet key, or general-purpose identity secret.
 
 ## Project Layout
 
