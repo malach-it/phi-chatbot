@@ -1090,7 +1090,7 @@ pub fn run_chatbot_cli() -> io::Result<()> {
         bot.train(DEFAULT_TRAIN_EPOCHS, DEFAULT_TRAIN_EPSILON);
         save_phi_memory(&bot)?
     } else {
-        save_phi_memory(&bot)?
+        None
     };
 
     println!("PhiNetwork chatbot");
