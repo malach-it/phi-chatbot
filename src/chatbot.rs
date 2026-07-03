@@ -1338,6 +1338,15 @@ mod tests {
     }
 
     #[test]
+    fn draws_non_finite_curve_points_on_zero_baseline() {
+        let drawing = draw_curve(&[f64::NAN, f64::INFINITY, f64::NEG_INFINITY], 8);
+
+        assert!(drawing.contains("0.0000"));
+        assert!(drawing.contains("NaN"));
+        assert!(!drawing.contains("-inf |"));
+    }
+
+    #[test]
     fn sparse_curve_report_draws_global_phi() {
         let mut bot = ChatBot::new_with_mode(ChatModelMode::SparseCurve);
         bot.add_example("rust borrow checker", "Rust answer");

@@ -15,8 +15,15 @@ pub(crate) fn draw_curve(points: &[f64], width: usize) -> String {
         return String::new();
     }
 
-    let min = points.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let plot_points = points
+        .iter()
+        .map(|point| if point.is_finite() { *point } else { 0.0 })
+        .collect::<Vec<_>>();
+    let min = plot_points.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = plot_points
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
     let scale = (max - min).max(1e-9);
     let width = width.max(2);
     let height = 10;
@@ -24,7 +31,7 @@ pub(crate) fn draw_curve(points: &[f64], width: usize) -> String {
 
     for column in 0..width {
         let x = column as f64 / (width - 1) as f64;
-        let value = interpolate_points(points, x);
+        let value = interpolate_points(&plot_points, x);
         let normalized = ((value - min) / scale).clamp(0.0, 1.0);
         let row = ((1.0 - normalized) * (height - 1) as f64).round() as usize;
         sampled_rows.push(row);

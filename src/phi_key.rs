@@ -91,6 +91,26 @@ impl PhiKeyPair {
         encoded_phi_points_from_points(&self.recovered_phi_points)
     }
 
+    pub(crate) fn recovered_phi_points(&self) -> &[f64] {
+        &self.recovered_phi_points
+    }
+
+    pub(crate) fn public_share_phi_points(&self, share_index: usize) -> Vec<f64> {
+        let mut points = vec![0.0; self.recovered_phi_points.len()];
+
+        let Some(share) = self.shares.iter().find(|share| share.index == share_index) else {
+            return points;
+        };
+
+        for (point_index, _) in &share.public_phi_points_hex {
+            if let Some(point) = self.recovered_phi_points.get(*point_index) {
+                points[*point_index] = *point;
+            }
+        }
+
+        points
+    }
+
     pub(crate) fn component_terms(&self) -> Vec<(usize, String)> {
         let share_count = self.shares.len();
 

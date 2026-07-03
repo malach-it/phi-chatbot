@@ -1,4 +1,5 @@
 use crate::chatbot::ChatBot;
+use crate::classifiers::draw_curve;
 use crate::phi_key::PhiKeyError;
 
 pub(crate) fn run(bot: &ChatBot, rest: &str) {
@@ -37,6 +38,7 @@ pub(crate) fn run(bot: &ChatBot, rest: &str) {
     for (point_index, point) in encoded_phi_points {
         println!("  {point_index}: {point}");
     }
+    print_key_part_plot("encoded phi_all", key_pair.recovered_phi_points());
 
     let encrypted_phin_shares = match key_pair.encrypted_phin_shares() {
         Ok(encrypted_phin_shares) => encrypted_phin_shares,
@@ -52,16 +54,27 @@ pub(crate) fn run(bot: &ChatBot, rest: &str) {
         for (point_index, point) in points {
             println!("    {point_index}: {point}");
         }
+        print_key_part_plot(
+            &format!("encrypted phin share {index} recovered phi"),
+            key_pair.recovered_phi_points(),
+        );
     }
 
     println!("component share formulas:");
     for (index, terms) in key_pair.component_terms() {
         println!("  {index}: {terms}");
+        let points = key_pair.public_share_phi_points(index);
+        print_key_part_plot(&format!("public share {index} assigned phi slots"), &points);
     }
 
     println!(
         "note: BLS-inspired deterministic model key; not a standard BLS signature key, wallet, or identity secret"
     );
+}
+
+fn print_key_part_plot(label: &str, points: &[f64]) {
+    println!("{label} plot:");
+    print!("{}", draw_curve(points, 32));
 }
 
 fn parse_share_count(rest: &str) -> Option<usize> {
