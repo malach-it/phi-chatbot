@@ -2,6 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::thread;
 
 use crate::classifiers::{
     add_curve_points, control_points_from_piecewise_linear, control_points_from_polynomial,
@@ -109,21 +111,64 @@ impl ChatBot {
             })
             .collect::<Vec<_>>();
 
-        self.classifiers = self
-            .responses
-            .iter()
-            .map(|response| {
-                ChatClassifier::train(
-                    self.mode,
-                    &encoded_examples,
-                    response,
-                    epochs,
-                    epsilon,
-                    self.vocabulary.len(),
-                    self.max_degree,
-                )
-            })
-            .collect();
+        let mode = self.mode;
+        let input_size = self.vocabulary.len();
+        let max_degree = self.max_degree;
+        let worker_count = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(self.responses.len().max(1));
+        let next_response = AtomicUsize::new(0);
+
+        self.classifiers = thread::scope(|scope| {
+            let handles = (0..worker_count)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut trained = Vec::new();
+
+                        loop {
+                            let response_index =
+                                next_response.fetch_add(1, AtomicOrdering::Relaxed);
+                            let Some(response) = self.responses.get(response_index) else {
+                                break;
+                            };
+
+                            trained.push((
+                                response_index,
+                                ChatClassifier::train(
+                                    mode,
+                                    &encoded_examples,
+                                    response,
+                                    epochs,
+                                    epsilon,
+                                    input_size,
+                                    max_degree,
+                                ),
+                            ));
+                        }
+
+                        trained
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let mut classifiers = (0..self.responses.len())
+                .map(|_| None)
+                .collect::<Vec<Option<ChatClassifier>>>();
+
+            for handle in handles {
+                for (response_index, classifier) in
+                    handle.join().expect("classifier worker panicked")
+                {
+                    classifiers[response_index] = Some(classifier);
+                }
+            }
+
+            classifiers
+                .into_iter()
+                .map(|classifier| classifier.expect("classifier worker skipped response"))
+                .collect()
+        });
     }
 
     fn prepare_model_shape(&mut self) {
