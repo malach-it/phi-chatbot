@@ -9,6 +9,7 @@ pub(crate) mod curve;
 pub(crate) mod examples;
 pub(crate) mod help;
 pub(crate) mod keypair;
+pub(crate) mod phil;
 pub(crate) mod responses;
 pub(crate) mod suggest;
 pub(crate) mod tokens;
@@ -68,6 +69,15 @@ pub(crate) fn dispatch(
         Ok(CommandAction::Continue)
     } else if let Some(rest) = line.strip_prefix("phi keypair ") {
         keypair::run(bot, rest);
+        Ok(CommandAction::Continue)
+    } else if line == "phil" || line == "phil o phi" {
+        phil::run(bot, "");
+        Ok(CommandAction::Continue)
+    } else if let Some(message) = line.strip_prefix("phil o phi ") {
+        phil::run(bot, message);
+        Ok(CommandAction::Continue)
+    } else if let Some(message) = line.strip_prefix("phil ") {
+        phil::run(bot, message);
         Ok(CommandAction::Continue)
     } else if let Some(message) = line.strip_prefix("tokens ") {
         tokens::run(message);

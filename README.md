@@ -30,8 +30,9 @@ suggest [limit] <message>    list likely replies from remembered examples
 examples                     list training examples
 responses                    list learned response classes
 clear context                forget accumulated session phi terms
-curve                        draw the learned overall phi curve
+curve                        draw the learned phi and phil functions
 keypair [shares]             print and plot encoded phi and encrypted phin shares
+phil <message>               apply phil o phi and print both transformations
 tokens <message>             show word tokens for a message
 vocab                        list bag-of-words features
 help                         show command help
@@ -40,7 +41,24 @@ quit                         exit
 
 Plain text without a command is treated like `ask <message>`.
 
+`phil` performs `phil o phi`. It learns a character-length target for each raw
+phi response class: responses with up to 10 Unicode characters have target `0`
+(`short`), while responses with 11 or more have target `1` (`long`). At
+inference, phi produces a class index and score, and `phil` maps only that raw
+class output to `0` or `1`; it reads neither text nor vocabulary. The explicit
+form `phil o phi <message>` is also accepted.
+
+The command prints phi's selected textual response for presentation, followed
+by phi's raw class output and `phil`'s binary output and classification. The
+displayed response text is not passed into `phil` during inference. The trained
+`phil` class function is stored and loaded alongside phi in
+`data/chatbot_phi_all.tsv`.
+
+The `curve` command displays only the labeled ASCII graphs for `phi_all` and
+`phil`; it omits the underlying point and class listings.
+
 If the chatbot is not confident enough, it asks for the right response and remembers that answer. Run `train` to rebuild the learned phi state from remembered examples.
+Phi predictions require a confidence score of at least `0.50` to be accepted as output.
 When an answer is confident, recursion feeds that answer back as the next prompt and prints each confident memorized transition. It stops when the next answer is low confidence, repeats, lacks an exact remembered transition from the previous answer, or reaches the recursion cap.
 
 ## Example Session

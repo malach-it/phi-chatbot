@@ -11,6 +11,14 @@ pub(crate) fn add_curve_points(total: &mut Option<Vec<f64>>, points: &[f64]) {
 }
 
 pub(crate) fn draw_curve(points: &[f64], width: usize) -> String {
+    draw_curve_with_point_list(points, width, true)
+}
+
+pub(crate) fn draw_curve_graph(points: &[f64], width: usize) -> String {
+    draw_curve_with_point_list(points, width, false)
+}
+
+fn draw_curve_with_point_list(points: &[f64], width: usize, list_points: bool) -> String {
     if points.is_empty() || width == 0 {
         return String::new();
     }
@@ -57,9 +65,11 @@ pub(crate) fn draw_curve(points: &[f64], width: usize) -> String {
     }
     output.push_str("1.00\n");
 
-    for (index, value) in points.iter().enumerate() {
-        let x = index as f64 / (points.len() - 1).max(1) as f64;
-        output.push_str(&format!("    point x={x:.2} y={value:>8.4}\n"));
+    if list_points {
+        for (index, value) in points.iter().enumerate() {
+            let x = index as f64 / (points.len() - 1).max(1) as f64;
+            output.push_str(&format!("    point x={x:.2} y={value:>8.4}\n"));
+        }
     }
 
     output

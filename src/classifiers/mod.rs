@@ -7,7 +7,7 @@ use crate::chatbot::{ChatModelMode, WeightedFeature};
 use self::dense_curve::DenseCurveClassifier;
 use self::sparse_phi::SparsePhiClassifier;
 
-pub(crate) use self::curve_plot::{add_curve_points, draw_curve};
+pub(crate) use self::curve_plot::{add_curve_points, draw_curve, draw_curve_graph};
 pub(crate) use self::sparse_phi::{
     control_points_from_piecewise_linear, control_points_from_polynomial, ensure_sparse_state,
     parse_float_list, parse_global_phi_expression, parse_index_list, parse_merged_phi_expression,

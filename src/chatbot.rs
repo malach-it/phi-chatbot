@@ -5,18 +5,21 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 
+#[cfg(test)]
+use crate::classifiers::draw_curve;
 use crate::classifiers::{
     add_curve_points, control_points_from_piecewise_linear, control_points_from_polynomial,
-    draw_curve, ensure_sparse_state, parse_float_list, parse_global_phi_expression,
+    draw_curve_graph, ensure_sparse_state, parse_float_list, parse_global_phi_expression,
     parse_index_list, parse_merged_phi_expression, remap_sparse_snapshot_states, ChatClassifier,
     EncodedChatExample, SparsePhiKind, SparsePhiSnapshotState,
 };
 use crate::commands::{self, CommandAction};
 use crate::phi_key::{encoded_phi_points_from_points, PhiKeyError, PhiKeyPair};
+use crate::phil::{Phil, PhilTransform};
 
 pub(crate) const DEFAULT_TRAIN_EPOCHS: usize = 2_000;
 pub(crate) const DEFAULT_TRAIN_EPSILON: f64 = 0.02;
-const UNKNOWN_CONFIDENCE_THRESHOLD: f64 = 0.30;
+const UNKNOWN_CONFIDENCE_THRESHOLD: f64 = 0.50;
 const MAX_RECURSIVE_RESULT_DEPTH: usize = 8;
 const SESSION_CONTEXT_DECAY: f64 = 0.65;
 const SESSION_CONTEXT_INPUT_WEIGHT: f64 = 0.25;
@@ -26,7 +29,9 @@ const CONTEXT_FEATURE_BOOST: f64 = 2.5;
 const CONTEXT_MEMORY_BONUS: f64 = 0.25;
 pub(crate) const MEMORY_PATH: &str = "data/chatbot_memory.tsv";
 const SPARSE_CURVE_PHI_MEMORY_PATH: &str = "data/chatbot_phi_all.tsv";
-const PHI_MEMORY_VERSION: &str = "phinetwork-chatbot-phi-v5";
+const PHI_MEMORY_VERSION: &str = "phinetwork-chatbot-phi-v7";
+const LEGACY_PHI_MEMORY_V6: &str = "phinetwork-chatbot-phi-v6";
+const LEGACY_PHI_MEMORY_V5: &str = "phinetwork-chatbot-phi-v5";
 const LEGACY_PHI_MEMORY_V4: &str = "phinetwork-chatbot-phi-v4";
 const LEGACY_PHI_MEMORY_V3: &str = "phinetwork-chatbot-phi-v3";
 const LEGACY_PHI_MEMORY_V2: &str = "phinetwork-chatbot-phi-v2";
@@ -38,6 +43,7 @@ pub struct ChatBot {
     vocabulary: Vec<String>,
     responses: Vec<String>,
     classifiers: Vec<ChatClassifier>,
+    phil: Option<Phil>,
     max_degree: usize,
     mode: ChatModelMode,
 }
@@ -54,6 +60,7 @@ impl ChatBot {
             vocabulary: Vec::new(),
             responses: Vec::new(),
             classifiers: Vec::new(),
+            phil: None,
             max_degree: 2,
             mode,
         }
@@ -169,6 +176,11 @@ impl ChatBot {
                 .map(|classifier| classifier.expect("classifier worker skipped response"))
                 .collect()
         });
+        self.train_phil();
+    }
+
+    fn train_phil(&mut self) {
+        self.phil = Phil::train(&self.responses);
     }
 
     fn prepare_model_shape(&mut self) {
@@ -179,6 +191,14 @@ impl ChatBot {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn reply(&self, message: &str) -> Option<ChatPrediction> {
         self.reply_with_last_result(message, None)
+    }
+
+    pub(crate) fn phi_output(&self, message: &str) -> Option<PhiOutput> {
+        self.phi_output_with_session_context_base(message, &SessionContext::default())
+    }
+
+    pub(crate) fn apply_phil(&self, phi_output: PhiOutput) -> Option<PhilTransform> {
+        self.phil.as_ref()?.apply(phi_output)
     }
 
     pub fn reply_with_last_result(
@@ -208,6 +228,19 @@ impl ChatBot {
         message: &str,
         session_context: &SessionContext,
     ) -> Option<ChatPrediction> {
+        let output = self.phi_output_with_session_context_base(message, session_context)?;
+
+        Some(ChatPrediction {
+            response: self.responses[output.response_index].clone(),
+            score: output.score,
+        })
+    }
+
+    fn phi_output_with_session_context_base(
+        &self,
+        message: &str,
+        session_context: &SessionContext,
+    ) -> Option<PhiOutput> {
         if self.classifiers.is_empty() {
             return None;
         }
@@ -218,8 +251,9 @@ impl ChatBot {
         self.classifiers
             .iter()
             .zip(&self.responses)
-            .map(|(classifier, response)| ChatPrediction {
-                response: response.clone(),
+            .enumerate()
+            .map(|(response_index, (classifier, response))| PhiOutput {
+                response_index,
                 score: classifier.predict(&features, self.vocabulary.len())
                     + self.context_memory_bonus(response, &features),
             })
@@ -367,7 +401,7 @@ impl ChatBot {
 
         if let Some(points) = self.phi_all_curve_points() {
             output.push_str("phi_all\n");
-            output.push_str(&draw_curve(&points, 48));
+            output.push_str(&draw_curve_graph(&points, 48));
             output.push('\n');
         }
 
@@ -379,11 +413,27 @@ impl ChatBot {
     }
 
     pub(crate) fn curve_report(&self) -> Option<String> {
-        match self.mode {
+        let mut output = match self.mode {
             ChatModelMode::DenseCurve => self.dense_curve_report(),
             ChatModelMode::SparseCurve => Some(self.sparse_phi_curve_report()),
             ChatModelMode::SparseScalar => Some(self.sparse_phi_curve_report()),
+        }?;
+
+        if let Some(phil) = &self.phil {
+            let targets = phil
+                .class_targets()
+                .iter()
+                .map(|target| *target as f64)
+                .collect::<Vec<_>>();
+
+            output.push_str("phil (response classes; 0=short, 1=long)\n");
+            output.push_str(&draw_curve_graph(&targets, 48));
+            output.push('\n');
+        } else {
+            output.push_str("phil is not trained yet\n");
         }
+
+        Some(output)
     }
 
     pub(crate) fn phi_all_key_pair(&self, share_count: usize) -> Result<PhiKeyPair, PhiKeyError> {
@@ -413,7 +463,7 @@ impl ChatBot {
 
         if let Some(points) = self.phi_all_curve_points() {
             output.push_str("phi_all\n");
-            output.push_str(&draw_curve(&points, 48));
+            output.push_str(&draw_curve_graph(&points, 48));
             output.push('\n');
         }
 
@@ -456,6 +506,15 @@ impl ChatBot {
                     output.push_str(&format!("phi\tall\tencoded\t{encoded_phi}\n"));
                 }
 
+                if let Some(targets) = self.phil.as_ref().map(Phil::class_targets) {
+                    let targets = targets
+                        .iter()
+                        .map(|target| target.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    output.push_str(&format!("phil\tclasses\t{targets}\n"));
+                }
+
                 Some(output)
             }
         }
@@ -494,6 +553,8 @@ impl ChatBot {
         };
 
         if version != PHI_MEMORY_VERSION
+            && version != LEGACY_PHI_MEMORY_V6
+            && version != LEGACY_PHI_MEMORY_V5
             && version != LEGACY_PHI_MEMORY_V4
             && version != LEGACY_PHI_MEMORY_V3
             && version != LEGACY_PHI_MEMORY_V2
@@ -507,6 +568,7 @@ impl ChatBot {
         let mut vocabulary = Vec::new();
         let mut responses = Vec::new();
         let mut sparse_states = Vec::<SparsePhiSnapshotState>::new();
+        let mut phil_class_targets = None;
 
         for line in lines {
             let fields = line.split('\t').collect::<Vec<_>>();
@@ -598,6 +660,16 @@ impl ChatBot {
                     ensure_sparse_state(&mut sparse_states, response_index);
                     sparse_states[response_index].curves.extend(curves);
                 }
+                ["phil", "classes", targets] => {
+                    let Some(targets) = targets
+                        .split(',')
+                        .map(|target| target.parse::<usize>().ok())
+                        .collect::<Option<Vec<_>>>()
+                    else {
+                        return false;
+                    };
+                    phil_class_targets = Some(targets);
+                }
                 _ => return false,
             }
         }
@@ -624,6 +696,18 @@ impl ChatBot {
             .into_iter()
             .map(|state| ChatClassifier::from_sparse_snapshot(kind, self.max_degree, state))
             .collect();
+
+        if version == PHI_MEMORY_VERSION {
+            let Some(targets) = phil_class_targets else {
+                return false;
+            };
+            let Some(phil) = Phil::from_class_targets(targets) else {
+                return false;
+            };
+            self.phil = Some(phil);
+        } else {
+            self.train_phil();
+        }
 
         true
     }
@@ -821,6 +905,12 @@ impl ChatExample {
 pub struct ChatPrediction {
     pub response: String,
     pub score: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PhiOutput {
+    pub(crate) response_index: usize,
+    pub(crate) score: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1220,9 +1310,9 @@ pub(crate) fn answer_or_learn(
     }
 
     if let Some(prediction) = prediction_chain.terminal {
-        let confidence = prediction.score.clamp(0.0, 1.0);
+        let confidence = formatted_confidence(prediction.score);
         println!(
-            "I am not confident. Best guess was: {} ({confidence:.3})",
+            "I am not confident. Best guess was: {} ({confidence})",
             prediction.response
         );
     } else {
@@ -1329,13 +1419,27 @@ fn record_prediction_chain(
 
 fn needs_training(prediction: Option<&ChatPrediction>) -> bool {
     prediction
-        .map(|prediction| prediction.score.clamp(0.0, 1.0) < UNKNOWN_CONFIDENCE_THRESHOLD)
+        .and_then(|prediction| normalized_confidence(prediction.score))
+        .map(|confidence| confidence < UNKNOWN_CONFIDENCE_THRESHOLD)
         .unwrap_or(true)
 }
 
 fn print_prediction(prediction: &ChatPrediction) {
-    let confidence = prediction.score.clamp(0.0, 1.0);
-    println!("{} ({confidence:.3})", prediction.response);
+    println!(
+        "{} ({})",
+        prediction.response,
+        formatted_confidence(prediction.score)
+    );
+}
+
+fn normalized_confidence(score: f64) -> Option<f64> {
+    score.is_finite().then(|| score.clamp(0.0, 1.0))
+}
+
+fn formatted_confidence(score: f64) -> String {
+    normalized_confidence(score)
+        .map(|confidence| format!("{confidence:.3}"))
+        .unwrap_or_else(|| "invalid confidence".to_string())
 }
 
 #[cfg(test)]
@@ -1401,6 +1505,9 @@ mod tests {
         let report = bot.curve_report().expect("curve report");
 
         assert!(report.contains("phi_all"));
+        assert!(report.contains("phil (response classes; 0=short, 1=long)"));
+        assert!(!report.contains("class 0:"));
+        assert!(!report.contains("point x="));
         assert!(!report.contains("response phi:"));
         assert!(report.contains('*'));
     }
@@ -1415,6 +1522,7 @@ mod tests {
         let report = bot.curve_report().expect("curve report");
 
         assert!(report.contains("phi_all"));
+        assert!(report.contains("phil (response classes; 0=short, 1=long)"));
         assert!(!report.contains("response:"));
         assert!(!report.contains("phi(msg:"));
         assert!(report.contains('*'));
@@ -1430,6 +1538,7 @@ mod tests {
         let report = bot.curve_report().expect("curve report");
 
         assert!(report.contains("phi_all"));
+        assert!(report.contains("phil (response classes; 0=short, 1=long)"));
         assert!(report.contains('*'));
     }
 
@@ -1456,6 +1565,19 @@ mod tests {
         let prediction = bot.reply("zebra nebula capacitor");
 
         assert!(needs_training(prediction.as_ref()));
+    }
+
+    #[test]
+    fn non_finite_confidence_always_needs_training() {
+        for score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let prediction = ChatPrediction {
+                response: "invalid prediction".to_string(),
+                score,
+            };
+
+            assert!(needs_training(Some(&prediction)));
+            assert_eq!(formatted_confidence(score), "invalid confidence");
+        }
     }
 
     #[test]
@@ -1621,12 +1743,17 @@ mod tests {
         trained.train(2_000, 0.01);
 
         let before = trained.reply("borrow checker").expect("before prediction");
+        let before_phi_output = trained
+            .phi_output("borrow checker")
+            .expect("raw phi output");
+        let before_phil = trained.apply_phil(before_phi_output).expect("trained phil");
         assert_eq!(before.response, "Rust answer");
         assert!(save_phi_memory_to_file(&trained, &path).unwrap());
         let snapshot = fs::read_to_string(&path).unwrap();
         assert!(snapshot.starts_with(PHI_MEMORY_VERSION));
         assert!(snapshot.contains("\tsum\tresponse["));
         assert!(snapshot.contains("phi\tall\tencoded\t"));
+        assert!(snapshot.contains("phil\tclasses\t"));
         assert!(snapshot.contains("term["));
         assert!(snapshot.contains("{y="));
 
@@ -1637,8 +1764,11 @@ mod tests {
 
         assert!(load_phi_memory_from_file(&mut loaded, &path).unwrap());
         let after = loaded.reply("borrow checker").expect("after prediction");
+        let after_phi_output = loaded.phi_output("borrow checker").expect("raw phi output");
+        let after_phil = loaded.apply_phil(after_phi_output).expect("loaded phil");
 
         assert_eq!(after.response, before.response);
+        assert_eq!(after_phil.output, before_phil.output);
 
         let _ = fs::remove_file(&path);
     }

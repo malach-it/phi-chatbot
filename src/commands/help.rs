@@ -9,8 +9,9 @@ pub(crate) fn run() {
     println!("  examples                     list training examples");
     println!("  responses                    list learned response classes");
     println!("  clear context                forget accumulated session phi terms");
-    println!("  curve                        draw learned phi curve");
+    println!("  curve                        draw learned phi and phil functions");
     println!("  keypair [shares]             print encoded phi and encrypted phin shares");
+    println!("  phil <message>               classify raw phi output as short or long");
     println!("  tokens <message>             show word tokens for a message");
     println!("  vocab                        list bag-of-words features");
     println!("  help                         show this help");

@@ -2,6 +2,7 @@ mod chatbot;
 mod classifiers;
 mod commands;
 mod phi_key;
+mod phil;
 mod phinetwork;
 
 fn main() -> std::io::Result<()> {
