@@ -1,7 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
+#[cfg(not(test))]
+use std::fs::File;
+#[cfg(not(test))]
+use std::io::Read;
 use std::io::{self, Write};
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(test))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -13,7 +21,6 @@ const ADULT_AGE: usize = 18;
 const DEFAULT_EPOCHS: usize = 2_000;
 const DEFAULT_EPSILON: f64 = 0.02;
 const MODEL_PATH: &str = "data/phi_age.tsv";
-const MODEL_VERSION: &str = "phi-age-v3";
 
 pub(crate) fn run(rest: &str) -> io::Result<()> {
     let Some(options) = TrainOptions::parse(rest) else {
@@ -156,11 +163,19 @@ struct AgeCurves {
 impl AgeCurves {
     fn train(samples: &[AgeSample], epochs: usize, epsilon: f64) -> Self {
         let curve_knots = (samples.len() * 32).clamp(64, 16_384);
+        let vocabulary_seed = random_seed();
+        let age_vocabulary = samples
+            .iter()
+            .map(|sample| sample.age)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|age| (age, random_age_token(&vocabulary_seed, age)))
+            .collect::<BTreeMap<_, _>>();
         let phi2_data = samples
             .iter()
             .map(|sample| TrainingExample {
                 inputs: vec![sample.name_input],
-                target: adult_target(sample.age),
+                target: age_vocabulary[&sample.age],
             })
             .collect::<Vec<_>>();
         let mut phi2 = PhiNetwork::new_with_curve_knots(1, 0.1, curve_knots);
@@ -187,8 +202,8 @@ impl AgeCurves {
     }
 
     fn predicts_adult(&self, name_input: f64) -> bool {
-        let latent_signal = self.phi2.predict(&[name_input]);
-        self.phi1.predict(&[latent_signal]) >= 0.5
+        let age_token = self.phi2.predict(&[name_input]);
+        self.phi1.predict(&[age_token]) >= 0.5
     }
 
     fn knows(&self, name: &str) -> bool {
@@ -197,18 +212,19 @@ impl AgeCurves {
 
     fn learn(&mut self, name: &str, age: usize, epochs: usize, epsilon: f64) {
         let name_input = encode_name(name);
+        let age_token = random_age_token(&random_seed(), age);
         self.phi2.train_existing_until_quiet(
             &[TrainingExample {
                 inputs: vec![name_input],
-                target: adult_target(age),
+                target: age_token,
             }],
             epsilon,
             epochs,
         );
-        let latent_signal = self.phi2.predict(&[name_input]);
+        let learned_token = self.phi2.predict(&[name_input]);
         self.phi1.train_existing_until_quiet(
             &[TrainingExample {
-                inputs: vec![latent_signal],
+                inputs: vec![learned_token],
                 target: adult_target(age),
             }],
             epsilon,
@@ -218,13 +234,10 @@ impl AgeCurves {
     }
 
     fn from_snapshot(snapshot: &str) -> Option<Self> {
-        let mut lines = snapshot.lines();
-        (lines.next()? == MODEL_VERSION).then_some(())?;
-
         let mut phi2_points = None;
         let mut phi1_points = None;
         let mut known_names = BTreeSet::new();
-        for line in lines {
+        for line in snapshot.lines() {
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
                 ["max_age", value] if *value == MAX_AGE.to_string() => {}
@@ -268,20 +281,20 @@ impl AgeCurves {
             .collect::<String>();
 
         format!(
-            "{MODEL_VERSION}\nmax_age\t{MAX_AGE}\nadult_age\t{ADULT_AGE}\nphi2\tcurve\t{phi2}\nphi1\tcurve\t{phi1}\n{known_names}"
+            "max_age\t{MAX_AGE}\nadult_age\t{ADULT_AGE}\nphi2\tcurve\t{phi2}\nphi1\tcurve\t{phi1}\n{known_names}"
         )
     }
 
     fn graph_report(&self) -> String {
         let mut output = String::new();
 
-        output.push_str("phi2 (encoded name -> latent over18 signal)\n");
+        output.push_str("phi2 (encoded name -> random age token)\n");
         output.push_str(&draw_curve_graph(
             self.phi2.curve_points(0).unwrap_or_default(),
             48,
         ));
         output.push('\n');
-        output.push_str("phi1 (raw phi2 output -> over18)\n");
+        output.push_str("phi1 (random age token -> over18)\n");
         output.push_str(&draw_curve_graph(
             self.phi1.curve_points(0).unwrap_or_default(),
             48,
@@ -373,6 +386,49 @@ fn valid_fingerprint(fingerprint: &str) -> bool {
 
 fn adult_target(age: usize) -> f64 {
     usize::from(age >= ADULT_AGE) as f64
+}
+
+fn random_age_token(seed: &[u8; 32], age: usize) -> f64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"phi-age-vocabulary-token-v1");
+    hasher.update(seed);
+    hasher.update(age.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    let unit = u64::from_be_bytes(bytes) as f64 / u64::MAX as f64;
+
+    0.05 + 0.90 * unit
+}
+
+#[cfg(test)]
+fn random_seed() -> [u8; 32] {
+    [0x5a; 32]
+}
+
+#[cfg(not(test))]
+fn random_seed() -> [u8; 32] {
+    let mut seed = [0_u8; 32];
+    if File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut seed))
+        .is_ok()
+    {
+        return seed;
+    }
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = Sha256::new();
+    hasher.update(b"phi-age-vocabulary-fallback-seed-v1");
+    hasher.update(std::process::id().to_be_bytes());
+    hasher.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+    hasher.update(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_be_bytes(),
+    );
+    hasher.finalize().into()
 }
 
 fn format_points(points: &[f64]) -> String {
@@ -473,12 +529,28 @@ mod tests {
     }
 
     #[test]
-    fn phi2_learns_only_the_binary_target_not_age() {
+    fn exact_ages_receive_distinct_random_vocabulary_tokens() {
+        let seed = random_seed();
+
+        let age_12 = random_age_token(&seed, 12);
+        let age_35 = random_age_token(&seed, 35);
+
+        assert!((0.05..=0.95).contains(&age_12));
+        assert!((0.05..=0.95).contains(&age_35));
+        assert_ne!(age_12, age_35);
+    }
+
+    #[test]
+    fn phi2_learns_random_tokens_instead_of_normalized_age() {
         let samples = parse_samples("Alice\t12\nBob\t35\n").expect("valid dataset");
         let curves = AgeCurves::train(&samples, 2_000, 0.02);
 
-        assert!(curves.phi2.predict(&[encode_name("Alice")]) < 0.5);
-        assert!(curves.phi2.predict(&[encode_name("Bob")]) >= 0.5);
+        let alice_token = curves.phi2.predict(&[encode_name("Alice")]);
+        let bob_token = curves.phi2.predict(&[encode_name("Bob")]);
+        let seed = random_seed();
+
+        assert!((alice_token - random_age_token(&seed, 12)).abs() <= 0.02);
+        assert!((bob_token - random_age_token(&seed, 35)).abs() <= 0.02);
     }
 
     #[test]
@@ -500,8 +572,8 @@ mod tests {
         let curves = AgeCurves::train(&samples, 2_000, 0.02);
         let report = curves.graph_report();
 
-        assert!(report.contains("phi2 (encoded name -> latent over18 signal)"));
-        assert!(report.contains("phi1 (raw phi2 output -> over18)"));
+        assert!(report.contains("phi2 (encoded name -> random age token)"));
+        assert!(report.contains("phi1 (random age token -> over18)"));
         assert!(report.contains('*'));
         assert!(!report.contains("point x="));
         assert!(!report.contains("Alice"));
