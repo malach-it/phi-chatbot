@@ -10,12 +10,35 @@ const DEFAULT_CURVE_KNOTS: usize = 8;
 
 impl PhiNetwork {
     pub fn new(input_size: usize, learning_rate: f64) -> Self {
+        Self::new_with_curve_knots(input_size, learning_rate, DEFAULT_CURVE_KNOTS)
+    }
+
+    pub(crate) fn new_with_curve_knots(
+        input_size: usize,
+        learning_rate: f64,
+        curve_knots: usize,
+    ) -> Self {
         Self {
             input_size,
             terms: Vec::new(),
-            curve: PhiCurve::new(DEFAULT_CURVE_KNOTS),
+            curve: PhiCurve::new(curve_knots),
             learning_rate,
         }
+    }
+
+    pub(crate) fn from_single_curve_points(control_points: Vec<f64>) -> Option<Self> {
+        if control_points.len() < 2 || control_points.iter().any(|point| !point.is_finite()) {
+            return None;
+        }
+
+        Some(Self {
+            input_size: 1,
+            terms: vec![PhiTerm {
+                input_indices: vec![0],
+            }],
+            curve: PhiCurve { control_points },
+            learning_rate: 0.1,
+        })
     }
 
     pub fn predict(&self, inputs: &[f64]) -> f64 {
@@ -53,6 +76,30 @@ impl PhiNetwork {
             max_degree,
             false,
         )
+    }
+
+    pub(crate) fn train_existing_until_quiet(
+        &mut self,
+        training_data: &[TrainingExample],
+        epsilon: f64,
+        max_epochs: usize,
+    ) -> bool {
+        if self.terms.is_empty() || training_data.is_empty() {
+            return false;
+        }
+
+        let cached_training_data = self.cache_training_data(training_data);
+        for _ in 0..max_epochs {
+            for example in &cached_training_data {
+                self.train_one_cached(&example.phi_inputs, example.target);
+            }
+
+            if self.max_error_cached(&cached_training_data) <= epsilon {
+                return true;
+            }
+        }
+
+        false
     }
 
     fn train_until_with_options(

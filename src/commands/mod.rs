@@ -37,6 +37,12 @@ pub(crate) fn dispatch(
     } else if let Some(rest) = line.strip_prefix("add ") {
         add::run(bot, session_context, rest)?;
         Ok(CommandAction::Continue)
+    } else if let Some(rest) = line.strip_prefix("train age ") {
+        crate::age::run(rest)?;
+        Ok(CommandAction::Continue)
+    } else if line == "train age" {
+        crate::age::run("")?;
+        Ok(CommandAction::Continue)
     } else if let Some(rest) = line.strip_prefix("train") {
         train::run(bot, rest)?;
         Ok(CommandAction::Continue)
@@ -56,7 +62,7 @@ pub(crate) fn dispatch(
         responses::run(bot);
         Ok(CommandAction::Continue)
     } else if line == "curve" {
-        curve::run(bot);
+        curve::run(bot)?;
         Ok(CommandAction::Continue)
     } else if line == "keypair" {
         keypair::run(bot, "");
@@ -78,6 +84,12 @@ pub(crate) fn dispatch(
         Ok(CommandAction::Continue)
     } else if let Some(message) = line.strip_prefix("phil ") {
         phil::run(bot, message);
+        Ok(CommandAction::Continue)
+    } else if line == "over18" {
+        crate::age::run_over18("")?;
+        Ok(CommandAction::Continue)
+    } else if let Some(name) = line.strip_prefix("over18 ") {
+        crate::age::run_over18(name)?;
         Ok(CommandAction::Continue)
     } else if let Some(message) = line.strip_prefix("tokens ") {
         tokens::run(message);

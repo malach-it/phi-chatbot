@@ -25,14 +25,17 @@ Press Enter to use the default sparse curve mode.
 ```text
 add <message> => <reply>     add one training example and save it
 train [epochs] [epsilon]     rebuild and train the chatbot
+train age <tsv> [epochs] [epsilon]
+                              train name -> age -> over-18 curves
 ask <message>                ask the trained chatbot
 suggest [limit] <message>    list likely replies from remembered examples
 examples                     list training examples
 responses                    list learned response classes
 clear context                forget accumulated session phi terms
-curve                        draw the learned phi and phil functions
+curve                        draw chatbot, phil, and stored age curves
 keypair [shares]             print and plot encoded phi and encrypted phin shares
 phil <message>               apply phil o phi and print both transformations
+over18 <name>                apply stored age curves and return true or false
 tokens <message>             show word tokens for a message
 vocab                        list bag-of-words features
 help                         show command help
@@ -40,6 +43,31 @@ quit                         exit
 ```
 
 Plain text without a command is treated like `ask <message>`.
+
+`train age` accepts `name<TAB>age` rows and derives only the binary target: `0`
+for under 18 and `1` for 18 or older. `phi2(name)` learns a latent signal for
+that target, and `phi1` is trained directly on the raw `phi2` output. No age
+value or random age vocabulary is used as an intermediate target. Names are
+deterministically encoded before training. The resulting curves and SHA-256
+name fingerprints are written to `data/phi_age.tsv`; source names and ages are
+not written to that model file. Because names contain no inherent age signal,
+this model is appropriate only for the names it learned and should not be
+treated as a privacy mechanism or as a predictor for unseen people.
+
+An example dataset is available at `examples/name_age.tsv`:
+
+```bash
+cargo run
+# Then enter: train age examples/name_age.tsv
+# Then query: over18 Alice
+```
+
+`over18` loads the stored curves and prints only the composed boolean result; it
+does not print the intermediate latent signal produced by `phi2`. If a name is
+unknown, it asks for an age, derives the binary target, incrementally updates
+both curves, and saves them.
+The model stores SHA-256 name fingerprints to recognize learned names, but name
+fingerprints can be dictionary-guessed and should not be treated as anonymous.
 
 `phil` performs `phil o phi`. It learns a character-length target for each raw
 phi response class: responses with up to 10 Unicode characters have target `0`
@@ -55,7 +83,9 @@ displayed response text is not passed into `phil` during inference. The trained
 `data/chatbot_phi_all.tsv`.
 
 The `curve` command displays only the labeled ASCII graphs for `phi_all` and
-`phil`; it omits the underlying point and class listings.
+`phil`; it omits the underlying point and class listings. After `train age`, it
+also displays graph-only plots for `phi2` (encoded name to latent over-18
+signal) and `phi1` (raw `phi2` output to the over-18 result).
 
 If the chatbot is not confident enough, it asks for the right response and remembers that answer. Run `train` to rebuild the learned phi state from remembered examples.
 Phi predictions require a confidence score of at least `0.50` to be accepted as output.
